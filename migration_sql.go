@@ -6,7 +6,6 @@ import (
 	"database/sql"
 	"io"
 	"log"
-	"os"
 	"path/filepath"
 	"strings"
 )
@@ -141,10 +140,7 @@ func runSQLMigration(conf *DBConf, db *sql.DB, scriptFile string, v int64, direc
 		log.Fatal("db.Begin:", err)
 	}
 
-	f, err := os.Open(scriptFile)
-	if err != nil {
-		log.Fatal(err)
-	}
+	f := strings.NewReader(string(conf.AssetMust(scriptFile)))
 
 	// find each statement, checking annotations for up/down direction
 	// and execute each of them in the current transaction.

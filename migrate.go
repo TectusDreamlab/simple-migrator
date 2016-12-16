@@ -5,12 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
-	"text/template"
 	"time"
 )
 
@@ -40,11 +38,6 @@ const (
 	DirectionUp   = Direction(true)
 )
 
-//go:generate sh -c "go get github.com/jteeuwen/go-bindata/go-bindata && go-bindata -pkg goose -o templates.go -nometadata -nocompress ./templates && gofmt -w templates.go"
-var goMigrationDriverTemplate = template.Must(template.New("").Parse(string(_templatesMigrationMainGoTmpl)))
-var goMigrationTemplate = template.Must(template.New("").Parse(string(_templatesMigrationGoTmpl)))
-var sqlMigrationTemplate = template.Must(template.New("").Parse(string(_templatesMigrationSqlTmpl)))
-
 type Migration struct {
 	Version   int64
 	IsApplied bool
@@ -59,25 +52,24 @@ func (ms migrationSorter) Len() int           { return len(ms) }
 func (ms migrationSorter) Swap(i, j int)      { ms[i], ms[j] = ms[j], ms[i] }
 func (ms migrationSorter) Less(i, j int) bool { return ms[i].Version < ms[j].Version }
 
-func RunMigrations(conf *DBConf, migrationsDir string, target int64) (err error) {
-	db, err := OpenDBFromDBConf(conf)
+func RunMigrations(conf *DBConf, target int64) (err error) {
+	db, err := openDBFromDBConf(conf)
 	if err != nil {
 		return err
 	}
 	defer db.Close()
 
-	return RunMigrationsOnDb(conf, migrationsDir, target, db)
+	return RunMigrationsOnDb(conf, conf.MigrationsDir, target, db)
 }
 
 // Runs migration on a specific database instance.
 func RunMigrationsOnDb(conf *DBConf, migrationsDir string, target int64, db *sql.DB) (err error) {
-	//TODO get rid of migrationsDir, it's already in conf.MigrationsDir
 	current, err := EnsureDBVersion(conf, db)
 	if err != nil {
 		return err
 	}
 
-	migrations, err := CollectMigrations(migrationsDir)
+	migrations, err := CollectMigrations(conf)
 	if err != nil {
 		return err
 	}
@@ -126,45 +118,36 @@ func RunMigrationsOnDb(conf *DBConf, migrationsDir string, target int64, db *sql
 	}
 
 	for _, m := range ms {
-		switch filepath.Ext(m.Source) {
-		case ".go":
-			err = runGoMigration(conf, m.Source, m.Version, direction)
-		case ".sql":
-			err = runSQLMigration(conf, db, m.Source, m.Version, direction)
-		}
-
+		err = runSQLMigration(conf, db, m.Source, m.Version, direction)
 		if err != nil {
 			return errors.New(fmt.Sprintf("FAIL %v, quitting migration", err))
 		}
 
 		fmt.Println("OK   ", filepath.Base(m.Source))
 	}
-
 	return nil
 }
 
 // collect all the valid looking migration scripts in the
 // migrations folder, and key them by version
-func CollectMigrations(dirpath string) (m []*Migration, err error) {
+func CollectMigrations(conf *DBConf) (m []*Migration, err error) {
 	// extract the numeric component of each migration,
 	// filter out any uninteresting files,
 	// and ensure we only have one file per migration version.
-	filepath.Walk(dirpath, func(name string, info os.FileInfo, err error) error {
-
+	files := conf.AssetNames()
+	for _, name := range files {
 		if v, e := NumericComponent(name); e == nil {
 
 			for _, g := range m {
 				if v == g.Version {
 					log.Fatalf("more than one file specifies the migration for version %d (%s and %s)",
-						v, g.Source, filepath.Join(dirpath, name))
+						v, g.Source, filepath.Join(conf.MigrationsDir, name))
 				}
 			}
 
 			m = append(m, &Migration{Version: v, Source: name})
 		}
-
-		return nil
-	})
+	}
 
 	return m, nil
 }
@@ -309,103 +292,22 @@ func createVersionTable(conf *DBConf, db *sql.DB) error {
 	return txn.Commit()
 }
 
-// wrapper for EnsureDBVersion for callers that don't already have
-// their own DB instance
-func GetDBVersion(conf *DBConf) (version int64, err error) {
-	db, err := OpenDBFromDBConf(conf)
-	if err != nil {
-		return -1, err
-	}
-	defer db.Close()
-
-	version, err = EnsureDBVersion(conf, db)
-	if err != nil {
-		return -1, err
-	}
-
-	return version, nil
-}
-
-func GetPreviousDBVersion(dirpath string, version int64) (previous int64, err error) {
-	previous = -1
-	sawGivenVersion := false
-
-	filepath.Walk(dirpath, func(name string, info os.FileInfo, walkerr error) error {
-
-		if !info.IsDir() {
-			if v, e := NumericComponent(name); e == nil {
-				if v > previous && v < version {
-					previous = v
-				}
-				if v == version {
-					sawGivenVersion = true
-				}
-			}
-		}
-
-		return nil
-	})
-
-	if previous == -1 {
-		if sawGivenVersion {
-			// the given version is (likely) valid but we didn't find
-			// anything before it.
-			// 'previous' must reflect that no migrations have been applied.
-			previous = 0
-		} else {
-			err = ErrNoPreviousVersion
-		}
-	}
-
-	return
-}
-
-// helper to identify the most recent possible version
-// within a folder of migration scripts
-func GetMostRecentDBVersion(dirpath string) (version int64, err error) {
+func GetMostRecentDBVersion(conf *DBConf) (version int64, err error) {
 	version = -1
 
-	filepath.Walk(dirpath, func(name string, info os.FileInfo, walkerr error) error {
-		if walkerr != nil {
-			return walkerr
-		}
+	migrations, err := conf.AssetDir(conf.MigrationsDir)
 
-		if !info.IsDir() {
-			if v, e := NumericComponent(name); e == nil {
-				if v > version {
-					version = v
-				}
+	if err != nil {
+		return
+	}
+
+	for _, migration := range migrations {
+		if v, e := NumericComponent(migration); e == nil {
+			if v > version {
+				version = v
 			}
 		}
-
-		return nil
-	})
-
-	if version == -1 {
-		err = errors.New("no valid version found")
 	}
-
-	return
-}
-
-func CreateMigration(name, migrationType, dir string, t time.Time) (path string, err error) {
-	if migrationType != "go" && migrationType != "sql" {
-		return "", errors.New("migration type must be 'go' or 'sql'")
-	}
-
-	timestamp := t.Format("20060102150405")
-	filename := fmt.Sprintf("%v_%v.%v", timestamp, name, migrationType)
-
-	fpath := filepath.Join(dir, filename)
-
-	var tmpl *template.Template
-	if migrationType == "sql" {
-		tmpl = sqlMigrationTemplate
-	} else {
-		tmpl = goMigrationTemplate
-	}
-
-	path, err = writeTemplateToFile(fpath, tmpl, timestamp)
 
 	return
 }
