@@ -11,7 +11,7 @@ The purpose is to make sure that whenever we start the application, we make sure
 
 ## Usage
 ```
-import migrator "github.com/WUMUXIAN/simple-migrator"
+import migrator "github.com/TectusDreamlab/simple-migrator"
 
 // Handle DB migrations.
 conf := migrator.NewDBConf("mysql", "root:mx@tcp(localhost:3306)/dreamlab?charset=utf8 ", MustAsset, AssetDir, AssetNames, "db/migrations")
